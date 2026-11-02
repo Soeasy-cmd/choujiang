@@ -391,14 +391,29 @@
 /* ============================================================
    Basics
    ============================================================ */
-const IS_ADMIN = location.pathname.replace(/\/+$/, "") === "/admin";
-const LS_P = "luckyDraw.participantToken";
-const LS_A = "luckyDraw.adminToken";
+function parseRoute() {
+  const path = location.pathname.replace(/\/+$/, "") || "/";
+  let m = path.match(/^\/s\/([^/]+)\/admin$/);
+  if (m) return { view: "admin", code: decodeURIComponent(m[1]) };
+  m = path.match(/^\/s\/([^/]+)$/);
+  if (m) return { view: "participant", code: decodeURIComponent(m[1]) };
+  return { view: "entry", code: null };
+}
+const ROUTE = parseRoute();
+const IS_ENTRY = ROUTE.view === "entry";
+const IS_ADMIN = ROUTE.view === "admin";
+const ROOM_CODE = ROUTE.code;
+const LS_LAST = "luckyDraw.lastRoom";
+const LS_P = ROOM_CODE ? "luckyDraw.pToken." + ROOM_CODE : "luckyDraw.pToken";
+const LS_A = ROOM_CODE ? "luckyDraw.aToken." + ROOM_CODE : "luckyDraw.aToken";
+const API = (path) => "/api/rooms/" + encodeURIComponent(ROOM_CODE || "") + path;
+const roomURL = (code) => location.origin + "/s/" + encodeURIComponent(code || ROOM_CODE || "");
+const adminURLFor = (code) => roomURL(code) + "/admin";
 
 const app = {
-  role: IS_ADMIN ? "admin" : "participant",
-  participantToken: localStorage.getItem(LS_P) || null,
-  adminToken: localStorage.getItem(LS_A) || null,
+  role: IS_ENTRY ? "entry" : IS_ADMIN ? "admin" : "participant",
+  participantToken: ROOM_CODE ? localStorage.getItem(LS_P) || null : null,
+  adminToken: ROOM_CODE ? localStorage.getItem(LS_A) || null : null,
   publicState: null,
   participantState: null,
   adminState: null,
@@ -409,6 +424,8 @@ const app = {
   activeDrawId: null,
   shownResults: new Set(),
   busy: false,
+  roomMissing: false,
+  entryNotice: "",
 };
 
 let serverOffset = 0;
@@ -470,7 +487,7 @@ async function api(path, options = {}) {
   let token;
   if (options.token === null) token = null;
   else if (options.token !== undefined) token = options.token;
-  else token = IS_ADMIN ? app.adminToken : app.participantToken;
+  else token = IS_ADMIN ? app.adminToken : IS_ENTRY ? null : app.participantToken;
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
   if (token) headers["Authorization"] = "Bearer " + token;
 
@@ -673,6 +690,7 @@ setInterval(updateCountdowns, 500);
    Shared label helpers
    ============================================================ */
 const STATUS_MAP = {
+  ready: ["名单抽奖", "blue"],
   registering: ["报名中", "green"],
   scheduled: ["已定时开奖", "blue"],
   drawing: ["开奖中", "gold"],
@@ -703,9 +721,92 @@ function shuffle(list) {
    ============================================================ */
 function render() {
   const root = document.getElementById("app");
-  if (IS_ADMIN) renderAdmin(root);
+  if (IS_ENTRY) renderEntry(root);
+  else if (app.roomMissing) renderRoomMissing(root);
+  else if (IS_ADMIN) renderAdmin(root);
   else renderParticipant(root);
   updateCountdowns();
+}
+
+/* ============================================================
+   Entry page & missing room
+   ============================================================ */
+function renderEntry(root) {
+  document.title = "幸运抽奖 · 多空间版";
+  root.innerHTML = `
+    <header class="hero" style="padding-bottom:.6rem">
+      <div class="eyebrow">LUCKY DRAW · 多空间抽奖</div>
+      <div style="margin-top:.6rem"><span class="logo">🎡</span></div>
+      <h1>同一个网址，各自独立开奖</h1>
+      <p class="hero-sub">每位发起者用自己设置的 PIN 进入专属后台；参与者用同一个参与网址加入当前空间。多个活动互不干扰。</p>
+    </header>
+    <main class="container" style="padding-top:.4rem">
+      ${app.entryNotice ? `<div class="warn">${esc(app.entryNotice)}</div>` : ""}
+      <div class="grid2">
+        <section class="glass">
+          <h2 style="font-size:1.15rem">🎯 参与者</h2>
+          <p class="muted small">如果你拿到了某个活动空间的参与链接，直接打开即可加入。</p>
+          <form id="joinCodeForm" class="join-form" autocomplete="off">
+            <input class="input" name="code" maxlength="32" placeholder="输入空间码（6 位）">
+            <button class="btn btn-primary" type="submit">进入活动</button>
+          </form>
+          <p class="hint">参与者入口统一为 <code>网址/s/空间码</code>，由发起者分享。</p>
+          <div class="link-row">
+            <div class="link-label">活动首页</div>
+            <code class="link-code">${esc(location.origin + "/")}</code>
+            <button class="btn btn-sm" data-copy="${esc(location.origin + "/")}">复制</button>
+          </div>
+        </section>
+
+        <section class="glass">
+          <h2 style="font-size:1.15rem">👑 发起者</h2>
+          ${app.adminToken ? `
+            <p class="muted small">你已登录空间 <b>${esc(ROOM_CODE)}</b>（${esc(app.adminState ? app.adminState.event.name : "")}）。</p>
+            <div class="btn-row"><button class="btn btn-primary" data-action="goto-own-admin">进入我的后台</button></div>
+          ` : `
+            <form id="adminPinForm" class="join-form" autocomplete="off">
+              <input class="input" name="pin" type="password" maxlength="32" placeholder="输入你设置的 PIN">
+              <button class="btn btn-primary" type="submit">进入后台</button>
+            </form>
+            <p class="hint">PIN 就是你创建空间时设置的那一组，与别人互不相同。</p>
+          `}
+          <div class="warn" style="margin-top:.9rem">还没有空间？在下方创建即可，设置 PIN 后会自动进入后台。</div>
+          <form id="createRoomForm" class="form-stack" style="margin-top:.7rem">
+            <label class="field">活动名称（可稍后修改）
+              <input class="input" name="name" maxlength="120" placeholder="如：2026 年会抽奖">
+            </label>
+            <label class="field">设置你的管理 PIN（至少 4 位，建议 6 位数字）
+              <input class="input" name="pin" type="password" inputmode="numeric" maxlength="32" required placeholder="例如 202611">
+            </label>
+            <label class="field">再输入一次 PIN
+              <input class="input" name="pin2" type="password" inputmode="numeric" maxlength="32" required placeholder="确认 PIN">
+            </label>
+            <button class="btn btn-purple" type="submit">创建抽奖空间</button>
+          </form>
+        </section>
+      </div>
+      <section class="glass" style="margin-top:1rem">
+        <h3>工作原理</h3>
+        <div class="link-row"><div class="link-label">发起者后台</div><code class="link-code">${esc(location.origin)}/s/<b>空间码</b>/admin</code><span class="muted small">凭 PIN 进入</span></div>
+        <div class="link-row"><div class="link-label">参与者入口</div><code class="link-code">${esc(location.origin)}/s/<b>空间码</b></code><span class="muted small">分享给参与者</span></div>
+        <p class="hint">每个空间的数据独立：人员、奖项、中奖记录、定时任务、导出都只属于该空间。发起者也可以上传 Excel / Word / TXT 名单作为参与人员。</p>
+      </section>
+    </main>`;
+}
+
+function renderRoomMissing(root) {
+  document.title = "空间不存在 · 幸运抽奖";
+  root.innerHTML = `
+    <div class="admin-login-wrap">
+      <div class="glass" style="width:min(460px,92vw);padding:1.8rem;text-align:center">
+        <div style="font-size:2.6rem">🫥</div>
+        <h2 style="margin-top:.6rem">空间不存在或已失效</h2>
+        <p class="muted small">空间码 <b>${esc(ROOM_CODE || "")}</b> 没有找到。免费实例重启后会清空所有空间，请向发起者确认最新的链接。</p>
+        <div class="btn-row" style="justify-content:center">
+          <a class="btn btn-primary" href="${esc(location.origin + "/")}">返回首页</a>
+        </div>
+      </div>
+    </div>`;
 }
 
 function loadingHTML() {
@@ -756,15 +857,25 @@ function participantJoinHTML(s) {
       ${live ? `<div class="banner"><div class="banner-icon">🎯</div><div class="banner-body"><div class="banner-title">正在开奖：${esc(live.title)}</div><div class="muted small">共 ${live.eligible_count} 人参与本轮抽取</div></div></div>` : ""}
       <div class="join-grid">
         <section class="glass join-card">
-          <h2>${open ? "加入抽奖" : "报名已关闭"}</h2>
-          <p class="muted">${open
-            ? "输入你的名字即可加入。开奖结果会实时推送到这个页面，重新打开链接也能查看。"
-            : "主办方已关闭报名。如果你之前已经加入，重新打开链接或使用参加活动的浏览器仍可查看自己的结果。"}</p>
+          <h2>${s.event.pool_mode === "roster" ? "名单抽奖" : open ? "加入抽奖" : "报名已关闭"}</h2>
+          <p class="muted">${s.event.pool_mode === "roster"
+            ? "发起者已导入参与名单。输入名单中的名字即可查看自己的中奖结果。"
+            : open
+              ? "输入你的名字即可加入。开奖结果会实时推送到这个页面，重新打开链接也能查看。"
+              : "主办方已关闭报名。如果你之前已经加入，重新打开链接或使用参加活动的浏览器仍可查看自己的结果。"}</p>
+          ${s.event.pool_mode === "roster" ? `
+          <div class="form-stack" style="margin-top:1rem">
+            <form id="claimForm" class="join-form" autocomplete="off">
+              <input class="input" id="joinNameInput" name="name" maxlength="80" placeholder="输入你在名单中的名字" value="${esc(app.drafts.joinName || "")}">
+              <button class="btn btn-primary" type="submit">认领身份</button>
+            </form>
+            <p class="hint">本次抽奖使用发起者导入的人员名单，无需报名。输入名单里的名字即可查看自己的结果。</p>
+          </div>` : `
           <form id="joinForm" class="join-form" autocomplete="off">
             <input class="input" id="joinNameInput" name="name" maxlength="80" placeholder="输入你的名字" value="${esc(app.drafts.joinName || "")}" ${joinDisabled ? "disabled" : ""}>
             <button class="btn btn-primary" type="submit" ${joinDisabled ? "disabled" : ""}>${open ? "加入" : "已关闭"}</button>
           </form>
-          <p class="hint">名字不能与已报名的人重复；同一浏览器会自动记住你的身份。</p>
+          <p class="hint">名字不能与已报名的人重复；同一浏览器会自动记住你的身份。已经报过名？输入原来的名字即可重新进入。</p>`}
         </section>
         <section class="glass">
           <h3>奖项预览 <span class="muted small">（${s.prizes.length}）</span></h3>
@@ -903,11 +1014,12 @@ function publicHistoryHTML(s) {
    ============================================================ */
 const ADMIN_TABS = [
   ["overview", "总览"],
+  ["participants", "参与人员"],
   ["prizes", "奖项"],
   ["draw", "开奖"],
-  ["participants", "参与者"],
   ["history", "中奖记录"],
 ];
+const SRS_LABEL = { join: "报名加入", import: "名单导入" };
 
 function renderAdmin(root) {
   if (!app.adminState) {
@@ -924,12 +1036,14 @@ function renderAdmin(root) {
         <div>
           <div class="eyebrow" style="font-size:.6rem">LUCKY DRAW · 后台</div>
           <div class="admin-title">${esc(s.event.name)}</div>
+          <div class="eyebrow" style="font-size:.58rem">空间码 ${esc(s.room.code)}</div>
         </div>
       </div>
       <div class="top-actions">
         ${statusBadge(s.event.status)}
         <span class="online-pill">● ${s.stats.online_count} 在线</span>
         <button class="btn btn-sm" data-action="copy-participant-link">参与者链接</button>
+        <button class="btn btn-sm btn-ghost" data-action="copy-admin-link">我的后台链接</button>
         <button class="btn btn-sm btn-ghost" data-action="admin-logout">退出</button>
       </div>
     </header>
@@ -956,11 +1070,11 @@ function adminLoginHTML() {
         </div>
         <form id="adminLoginForm">
           <label class="field">管理 PIN
-            <input class="input" name="pin" type="password" inputmode="numeric" autocomplete="current-password" placeholder="请输入 PIN" maxlength="200" style="text-align:center;letter-spacing:.3em;font-size:1.1rem">
+            <input class="input" name="pin" type="password" inputmode="numeric" autocomplete="current-password" placeholder="请输入你设置的 PIN" maxlength="32" style="text-align:center;letter-spacing:.3em;font-size:1.1rem">
           </label>
           <button class="btn btn-primary" type="submit" style="width:100%;margin-top:.4rem">进入后台</button>
         </form>
-        <p class="hint center" style="margin-top:1rem">管理 PIN 与部署时设置的 Space Secret <code>ADMIN_PIN</code> 一致</p>
+        <p class="hint center" style="margin-top:1rem">这是空间 <b>${esc(ROOM_CODE || "")}</b> 的后台，请用创建该空间时设置的 PIN。忘记 PIN 请回到 <a href="${esc(location.origin + "/")}">首页</a>。</p>
       </div>
     </div>`;
 }
@@ -982,8 +1096,8 @@ function overviewTabHTML(s) {
   const nameVal = app.drafts.eventName != null ? app.drafts.eventName : ev.name;
   const daysVal = app.drafts.cooldownDays != null ? app.drafts.cooldownDays : String(ev.cooldown_days);
   const excluded = s.excluded || [];
-  const participantURL = location.origin + "/";
-  const adminURL = location.origin + "/admin";
+  const participantURL = roomURL();
+  const adminURL = adminURLFor();
   return `
     <div class="stat-grid">
       ${statHTML("报名人数", s.stats.participant_count)}
@@ -1010,6 +1124,13 @@ function overviewTabHTML(s) {
         <label class="field">冷却天数
           <input class="input" id="cooldownDaysInput" type="number" min="0" max="3650" value="${esc(daysVal)}">
         </label>
+        <label class="field">参与方式
+          <select class="select" id="poolModeSelect">
+            <option value="registration" ${ev.pool_mode === "registration" ? "selected" : ""}>现场报名（参与者自己输名字加入）</option>
+            <option value="roster" ${ev.pool_mode === "roster" ? "selected" : ""}>导入名单（主办方上传 Excel / Word / TXT）</option>
+          </select>
+        </label>
+        <p class="hint">已有开奖记录或定时任务时不能切换参与方式。导入名单会自动切换为「导入名单」。</p>
         <div class="btn-row">
           <button class="btn btn-primary" data-action="save-event">保存设置</button>
         </div>
@@ -1017,6 +1138,11 @@ function overviewTabHTML(s) {
 
       <section class="glass">
         <h3>分享与存档</h3>
+        <div class="link-row">
+          <div class="link-label">空间码</div>
+          <code class="link-code">${esc(s.room.code)}</code>
+          <button class="btn btn-sm" data-copy="${esc(s.room.code)}">复制</button>
+        </div>
         <div class="link-row">
           <div class="link-label">参与者链接</div>
           <code class="link-code">${esc(participantURL)}</code>
@@ -1027,8 +1153,12 @@ function overviewTabHTML(s) {
           <code class="link-code">${esc(adminURL)}</code>
           <button class="btn btn-sm" data-copy="${esc(adminURL)}">复制</button>
         </div>
-        <div class="warn">⚠️ 免费 Space 的磁盘是临时的：实例重启或重新部署后数据会清空。活动结束后请立即在「中奖记录」导出 Excel / TXT 存档。</div>
+        <div class="warn">⚠️ 免费实例重启或重新部署后，所有空间的数据都会清空。活动结束后请立即在「中奖记录」导出 Excel / TXT 存档。</div>
         ${scheduleCard(s)}
+        <div class="switch-row" style="margin-top:.9rem">
+          <div><div class="switch-title">管理 PIN</div><div class="muted small">修改后，其他已登录设备需要重新输入 PIN</div></div>
+          <button class="btn btn-sm" data-action="pin-change">修改 PIN</button>
+        </div>
       </section>
     </div>
     <section class="glass" style="margin-top:1rem">
@@ -1215,21 +1345,295 @@ function pruneDrawDraft(s) {
 function participantsTabHTML(s) {
   const excludedIds = new Set((s.excluded || []).map((e) => e.id));
   const q = app.drafts.search || "";
+  const imported = s.participants.filter((p) => p.source === "import").length;
+  const joined = s.participants.length - imported;
+  const rosterMode = s.event.pool_mode === "roster";
   return `
     <div class="tab-head">
-      <h2>参与者 <span class="muted small">（${s.participants.length}）</span></h2>
-      <input class="input" id="participantSearch" placeholder="搜索名字" value="${esc(q)}" style="max-width:260px;margin-top:0">
+      <h2>参与人员 <span class="muted small">（${s.participants.length}）</span></h2>
+      <div class="btn-row" style="margin-top:0">
+        <button class="btn btn-primary" data-action="roster-import">📥 导入名单</button>
+        <button class="btn btn-sm" data-action="roster-add">＋ 手动添加</button>
+        <button class="btn btn-sm btn-danger" data-action="roster-clear" ${s.participants.length ? "" : "disabled"}>清空名单</button>
+      </div>
+    </div>
+    <div class="chips" style="margin-bottom:.8rem">
+      <span class="chip">当前参与方式：${rosterMode ? "导入名单" : "现场报名"}</span>
+      ${rosterMode ? "" : `<span class="chip">名单导入 ${imported} 人</span><span class="chip">现场报名 ${joined} 人</span>`}
+      <span class="muted small">导入名单会自动切换为「导入名单」模式；同一空间内名字不能重复。</span>
+    </div>
+    <div class="tab-head" style="margin-bottom:.8rem">
+      <input class="input" id="participantSearch" placeholder="搜索名字" value="${esc(q)}" style="max-width:300px;margin-top:0">
     </div>
     <section class="glass">
       ${s.participants.length ? `<div class="p-list">
         ${s.participants.map((p) => `<div class="p-row" data-participant-row data-name="${esc(p.name.toLowerCase())}">
           <span class="dot ${p.online ? "on" : ""}"></span>
-          <div class="pr-name">${esc(p.name)} ${excludedIds.has(p.id) ? '<span class="mini-badge">冷却中</span>' : ""}</div>
-          <div class="pr-time">${fmtTime(p.joined_at, false)} 加入${p.online ? " · 在线" : ""}</div>
-          <button class="btn btn-sm btn-danger" data-action="remove-participant" data-id="${p.id}" data-name="${esc(p.name)}">移除</button>
+          <div class="pr-name">${esc(p.name)}
+            ${p.source === "import" ? '<span class="mini-badge">导入</span>' : ""}
+            ${excludedIds.has(p.id) ? '<span class="mini-badge">冷却中</span>' : ""}</div>
+          <div class="pr-time">${fmtTime(p.joined_at, false)} · ${SRS_LABEL[p.source] || "加入"}${p.online ? " · 在线" : ""}</div>
+          <div class="btn-row" style="margin-top:0">
+            <button class="btn btn-sm" data-action="roster-rename" data-id="${p.id}" data-name="${esc(p.name)}">改名</button>
+            <button class="btn btn-sm btn-danger" data-action="remove-participant" data-id="${p.id}" data-name="${esc(p.name)}">移除</button>
+          </div>
         </div>`).join("")}
-      </div>` : `<div class="empty">还没有参与者加入</div>`}
+      </div>` : `<div class="empty">还没有参与人员。可以导入 Excel / Word / TXT 名单，或让对方打开参与链接报名。</div>`}
     </section>`;
+}
+
+/* ---------------- roster tools ---------------- */
+async function parseRosterFile(file) {
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch(API("/admin/roster/parse"), {
+    method: "POST",
+    headers: { Authorization: "Bearer " + app.adminToken },
+    body: fd,
+  });
+  const ct = res.headers.get("content-type") || "";
+  let data = null;
+  if (ct.includes("application/json")) data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(detailMessage(data && data.detail, res.status));
+  return data;
+}
+
+function openRosterImport() {
+  openModal(`
+    <div class="modal-head"><h2>导入人员名单</h2><button class="icon-btn" data-action="close-modal" aria-label="关闭">✕</button></div>
+    <form id="rosterImportForm" class="form-stack">
+      <p class="muted small">支持 Excel（.xlsx / .csv）、Word（.docx）、纯文本（.txt）。系统会自动识别姓名列；导入前可以在这里直接修改。</p>
+      <label class="field">选择文件
+        <input class="input" name="file" type="file" accept=".xlsx,.xls,.csv,.docx,.doc,.txt">
+      </label>
+      <div class="hint" id="rosterParseInfo">未选择文件时，也可以直接粘贴名单（每行一个名字）。</div>
+      <label class="field">名单内容（每行一个名字）
+        <textarea class="textarea" name="names" rows="10" placeholder="张三&#10;李四&#10;王五"></textarea>
+      </label>
+      <div class="form-row">
+        <label class="field">导入方式
+          <select class="select" name="mode">
+            <option value="replace">替换现有名单</option>
+            <option value="append" selected>追加到现有名单</option>
+          </select>
+        </label>
+        <label class="field">当前名单人数
+          <input class="input" value="${app.adminState ? app.adminState.stats.participant_count : 0}" disabled>
+        </label>
+      </div>
+      <p class="hint">替换会清空现有参与人员；追加会跳过同名人员。导入完成后参与方式自动切换为「导入名单」。</p>
+      <div class="btn-row">
+        <button type="button" class="btn btn-ghost" data-action="close-modal">取消</button>
+        <button type="submit" class="btn btn-primary">确认导入</button>
+      </div>
+    </form>
+  `, { wide: true });
+}
+
+async function handleRosterFile(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const info = document.getElementById("rosterParseInfo");
+  const ta = document.querySelector('#rosterImportForm textarea[name="names"]');
+  if (info) info.textContent = "正在解析文件…";
+  try {
+    const data = await parseRosterFile(file);
+    if (ta) ta.value = data.names.join("\n");
+    if (info) {
+      info.className = "hint";
+      info.textContent = `已从 ${file.name}（${data.format}）识别到 ${data.names.length} 个名字，可在上方修改后导入。`;
+    }
+  } catch (e) {
+    if (info) { info.className = "hint warn-text"; info.textContent = e.message; }
+    toast(e.message, "error", 4200);
+  }
+}
+
+function rosterNamesFromForm(form) {
+  const ta = form.querySelector('[name="names"]');
+  const seen = new Set();
+  const names = [];
+  for (const raw of String(ta ? ta.value : "").split(/\r?\n/)) {
+    const name = raw.trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    names.push(name);
+  }
+  return names;
+}
+
+async function submitRosterImport(form) {
+  const names = rosterNamesFromForm(form);
+  if (!names.length) return toast("名单为空，请先选择文件或粘贴名字", "error");
+  const mode = form.querySelector('[name="mode"]').value;
+  const btn = form.querySelector('[type="submit"]');
+  if (btn) { btn.disabled = true; btn.textContent = "导入中…"; }
+  try {
+    const res = await api(API("/admin/roster/replace"), { method: "POST", body: { names, mode } });
+    app.adminState = res.state;
+    syncServer(res.state);
+    closeModal();
+    render();
+    toast(`已导入 ${res.added} 人${mode === "replace" ? "（替换名单）" : "（追加）"}`, "success", 3800);
+  } catch (e) {
+    toast(e.message, "error", 4200);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "确认导入"; }
+  }
+}
+
+function openRosterAdd() {
+  openModal(`
+    <div class="modal-head"><h2>手动添加人员</h2><button class="icon-btn" data-action="close-modal" aria-label="关闭">✕</button></div>
+    <form id="rosterAddForm" class="form-stack">
+      <label class="field">姓名
+        <input class="input" name="name" maxlength="60" required placeholder="输入姓名">
+      </label>
+      <p class="hint">添加后此人会计入抽奖名单，参与方式保持不变。</p>
+      <div class="btn-row">
+        <button type="button" class="btn btn-ghost" data-action="close-modal">取消</button>
+        <button type="submit" class="btn btn-primary">添加</button>
+      </div>
+    </form>
+  `);
+}
+
+async function submitRosterAdd(form) {
+  const name = String(form.querySelector('[name="name"]').value || "").trim();
+  if (!name) return toast("请输入姓名", "error");
+  const btn = form.querySelector('[type="submit"]');
+  if (btn) { btn.disabled = true; btn.textContent = "添加中…"; }
+  try {
+    const res = await api(API("/admin/roster"), { method: "POST", body: { name } });
+    app.adminState = res.state;
+    syncServer(res.state);
+    closeModal();
+    render();
+    toast(`已添加 ${name}`, "success");
+  } catch (e) {
+    toast(e.message, "error");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "添加"; }
+  }
+}
+
+function openRosterRename(id, name) {
+  openModal(`
+    <div class="modal-head"><h2>修改名字</h2><button class="icon-btn" data-action="close-modal" aria-label="关闭">✕</button></div>
+    <form id="rosterRenameForm" class="form-stack" data-id="${esc(id)}">
+      <label class="field">姓名
+        <input class="input" name="name" maxlength="60" required value="${esc(name)}">
+      </label>
+      <div class="btn-row">
+        <button type="button" class="btn btn-ghost" data-action="close-modal">取消</button>
+        <button type="submit" class="btn btn-primary">保存</button>
+      </div>
+    </form>
+  `);
+}
+
+async function submitRosterRename(form) {
+  const id = form.dataset.id;
+  const name = String(form.querySelector('[name="name"]').value || "").trim();
+  if (!name) return toast("请输入姓名", "error");
+  const btn = form.querySelector('[type="submit"]');
+  if (btn) { btn.disabled = true; btn.textContent = "保存中…"; }
+  try {
+    const res = await api(API(`/admin/roster/${id}`), { method: "PATCH", body: { name } });
+    app.adminState = res.state;
+    syncServer(res.state);
+    closeModal();
+    render();
+    toast("名字已更新", "success");
+  } catch (e) {
+    toast(e.message, "error");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "保存"; }
+  }
+}
+
+function confirmClearRoster() {
+  openConfirm({
+    title: "清空参与人员",
+    message: "确定清空该空间的全部参与人员吗？已中奖记录会保留，但名单需要重新导入。",
+    confirmText: "清空名单",
+    danger: true,
+    onConfirm: async () => {
+      try {
+        const res = await api(API("/admin/roster"), { method: "DELETE" });
+        app.adminState = res.state;
+        syncServer(res.state);
+        closeModal();
+        render();
+        toast("参与人员已清空", "success");
+      } catch (e) { toast(e.message, "error"); }
+    },
+  });
+}
+
+function openPinChange() {
+  openModal(`
+    <div class="modal-head"><h2>修改管理 PIN</h2><button class="icon-btn" data-action="close-modal" aria-label="关闭">✕</button></div>
+    <form id="pinChangeForm" class="form-stack">
+      <p class="muted small">PIN 在所有发起者之间必须唯一，用于从首页直接进入你的空间。</p>
+      <label class="field">新 PIN（至少 4 位，建议 6 位数字）
+        <input class="input" name="pin" type="password" inputmode="numeric" maxlength="32" required>
+      </label>
+      <label class="field">再输入一次
+        <input class="input" name="pin2" type="password" inputmode="numeric" maxlength="32" required>
+      </label>
+      <div class="btn-row">
+        <button type="button" class="btn btn-ghost" data-action="close-modal">取消</button>
+        <button type="submit" class="btn btn-primary">保存新 PIN</button>
+      </div>
+    </form>
+  `);
+}
+
+async function submitPinChange(form) {
+  const pin = String(form.querySelector('[name="pin"]').value || "").trim();
+  const pin2 = String(form.querySelector('[name="pin2"]').value || "").trim();
+  if (pin.length < 4) return toast("PIN 至少 4 位", "error");
+  if (pin !== pin2) return toast("两次输入的 PIN 不一致", "error");
+  const btn = form.querySelector('[type="submit"]');
+  if (btn) { btn.disabled = true; btn.textContent = "保存中…"; }
+  try {
+    const res = await api(API("/admin/pin"), { method: "PATCH", body: { new_pin: pin } });
+    app.adminState = res.state;
+    syncServer(res.state);
+    closeModal();
+    render();
+    toast("管理 PIN 已更新", "success", 3800);
+  } catch (e) {
+    toast(e.message, "error", 4200);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "保存新 PIN"; }
+  }
+}
+
+function confirmSwitchPoolMode(mode) {
+  const label = mode === "roster" ? "导入名单" : "现场报名";
+  openConfirm({
+    title: "切换参与方式",
+    message: `确定切换为「${label}」吗？已有开奖记录或定时任务时不能切换。切换后不会清空现有人员。`,
+    confirmText: "切换",
+    onConfirm: async () => {
+      try {
+        const res = await api(API("/admin/event"), { method: "PATCH", body: { pool_mode: mode } });
+        app.adminState = res.state;
+        syncServer(res.state);
+        closeModal();
+        render();
+        toast(`参与方式已切换为「${label}」`, "success");
+      } catch (e) {
+        toast(e.message, "error", 4200);
+        const sel = document.getElementById("poolModeSelect");
+        if (sel && app.adminState) sel.value = app.adminState.event.pool_mode;
+      }
+    },
+  });
 }
 
 /* ---------------- history ---------------- */
@@ -1241,6 +1645,7 @@ function historyTabHTML(s) {
       <div class="btn-row" style="margin-top:0">
         <button class="btn btn-sm" data-action="export-xlsx">导出 Excel</button>
         <button class="btn btn-sm" data-action="export-txt">导出 TXT</button>
+        <button class="btn btn-sm" data-action="export-winners" ${list.length ? "" : "disabled"}>导出中奖名单</button>
         <button class="btn btn-sm btn-danger" data-action="history-clear" ${list.length ? "" : "disabled"}>清空历史</button>
       </div>
     </div>
@@ -1556,7 +1961,8 @@ async function onDrawFinished(drawId) {
    ============================================================ */
 async function refreshPublic() {
   try {
-    const s = await api("/api/public", { token: null });
+    const s = await api("/api/public?room=" + encodeURIComponent(ROOM_CODE || ""), { token: null });
+    app.roomMissing = false;
     app.publicState = s;
     syncServer(s);
     render();
@@ -1566,13 +1972,16 @@ async function refreshPublic() {
       app.activeDrawId = null;
       hideDrawOverlay();
     }
-  } catch (e) { /* offline: keep last state */ }
+  } catch (e) {
+    if (e.status === 404) { app.roomMissing = true; app.publicState = null; render(); }
+    /* offline otherwise: keep last state */
+  }
 }
 
 async function refreshParticipant() {
   if (!app.participantToken) return;
   try {
-    const s = await api("/api/participant/state");
+    const s = await api(API("/participant/state"));
     app.participantState = s;
     app.publicState = null;
     syncServer(s);
@@ -1585,7 +1994,13 @@ async function refreshParticipant() {
       app.participantState = null;
       closeWS();
       await refreshPublic();
-      toast("参会凭证已失效，请重新加入活动", "error");
+      toast("参会凭证已失效，请重新" + (app.publicState && app.publicState.event.pool_mode === "roster" ? "认领身份" : "加入活动"), "error");
+    } else if (e.status === 403 || e.status === 404) {
+      localStorage.removeItem(LS_P);
+      app.participantToken = null;
+      app.participantState = null;
+      closeWS();
+      await refreshPublic();
     }
   }
 }
@@ -1593,20 +2008,20 @@ async function refreshParticipant() {
 async function refreshAdmin() {
   if (!app.adminToken) return;
   try {
-    const s = await api("/api/admin/state");
+    const s = await api(API("/admin/state"));
     app.adminState = s;
     syncServer(s);
     pruneDrawDraft(s);
     render();
     maybeShowOrCompleteDraw(s);
   } catch (e) {
-    if (e.status === 401) {
+    if (e.status === 401 || e.status === 403 || e.status === 404) {
       localStorage.removeItem(LS_A);
       app.adminToken = null;
       app.adminState = null;
       closeWS();
       render();
-      toast("登录已过期，请重新登录", "error");
+      toast(e.status === 404 ? "空间不存在或已失效" : "登录已过期，请重新登录", "error");
     }
   }
 }
@@ -1637,11 +2052,12 @@ function closeWS() {
 }
 
 function connectWS() {
+  if (IS_ENTRY || !ROOM_CODE) return;
   const token = IS_ADMIN ? app.adminToken : app.participantToken;
   if (!token) return;
   closeWS();
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  const url = `${proto}://${location.host}/ws?role=${IS_ADMIN ? "admin" : "participant"}&token=${encodeURIComponent(token)}`;
+  const url = `${proto}://${location.host}/ws?role=${IS_ADMIN ? "admin" : "participant"}&room=${encodeURIComponent(ROOM_CODE)}&token=${encodeURIComponent(token)}`;
   try { ws = new WebSocket(url); } catch (e) { return; }
 
   ws.onopen = () => {
@@ -1705,7 +2121,7 @@ async function doJoin(name) {
   const value = String(name || "").trim();
   if (!value) return toast("请输入你的名字", "error");
   try {
-    const res = await api("/api/join", { method: "POST", body: { name: value }, token: null });
+    const res = await api(API("/join"), { method: "POST", body: { name: value }, token: null });
     app.drafts.joinName = "";
     app.participantToken = res.participant.token;
     localStorage.setItem(LS_P, app.participantToken);
@@ -1721,13 +2137,88 @@ async function doJoin(name) {
   }
 }
 
+async function doClaim(name) {
+  const value = String(name || "").trim();
+  if (!value) return toast("请输入你在名单中的名字", "error");
+  try {
+    const res = await api(API("/claim"), { method: "POST", body: { name: value }, token: null });
+    app.drafts.joinName = "";
+    app.participantToken = res.participant.token;
+    localStorage.setItem(LS_P, app.participantToken);
+    app.participantState = res.state;
+    app.publicState = null;
+    syncServer(res.state);
+    render();
+    connectWS();
+    toast(`已找到你，${res.participant.name}`, "success");
+    if (res.state.current_draw) showDrawOverlay(res.state.current_draw);
+  } catch (e) {
+    toast(e.message, "error");
+  }
+}
+
+async function enterRoomCode(code) {
+  const value = String(code || "").trim();
+  if (!value) return toast("请输入空间码", "error");
+  try {
+    const res = await fetch("/api/public?room=" + encodeURIComponent(value));
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(detailMessage(data && data.detail, res.status));
+    }
+    location.href = roomURL(value);
+  } catch (e) {
+    toast(e.message || "没有找到这个空间", "error");
+  }
+}
+
+async function doCreateRoom(form) {
+  const fd = new FormData(form);
+  const name = String(fd.get("name") || "").trim();
+  const pin = String(fd.get("pin") || "").trim();
+  const pin2 = String(fd.get("pin2") || "").trim();
+  if (pin.length < 4) return toast("PIN 至少 4 位（建议 6 位数字）", "error");
+  if (pin !== pin2) return toast("两次输入的 PIN 不一致", "error");
+  const btn = form.querySelector('[type="submit"]');
+  if (btn) { btn.disabled = true; btn.textContent = "创建中…"; }
+  try {
+    const res = await api("/api/rooms", { method: "POST", body: { pin, name }, token: null });
+    const code = res.room.code;
+    localStorage.setItem("luckyDraw.aToken." + code, res.token);
+    localStorage.setItem(LS_LAST, code);
+    toast("空间已创建，正在进入后台…", "success");
+    setTimeout(() => { location.href = adminURLFor(code); }, 500);
+  } catch (e) {
+    toast(e.message, "error", 4200);
+    if (btn) { btn.disabled = false; btn.textContent = "创建抽奖空间"; }
+  }
+}
+
+async function doEntryAdminLogin(pin) {
+  const value = String(pin || "").trim();
+  if (!value) return toast("请输入 PIN", "error");
+  try {
+    const res = await api("/api/admin/login", { method: "POST", body: { pin: value }, token: null });
+    const code = res.room.code;
+    localStorage.setItem("luckyDraw.aToken." + code, res.token);
+    localStorage.setItem(LS_LAST, code);
+    toast(`已找到你的空间 ${code}，正在进入…`, "success");
+    setTimeout(() => { location.href = adminURLFor(code); }, 500);
+  } catch (e) {
+    toast(e.message, "error", 4200);
+  }
+}
+
+
+
 async function doAdminLogin(pin) {
   const value = String(pin || "").trim();
   if (!value) return toast("请输入管理 PIN", "error");
   try {
-    const res = await api("/api/admin/login", { method: "POST", body: { pin: value }, token: null });
+    const res = await api(API("/admin/login"), { method: "POST", body: { pin: value }, token: null });
     app.adminToken = res.token;
     localStorage.setItem(LS_A, res.token);
+    localStorage.setItem(LS_LAST, ROOM_CODE);
     app.adminState = res.state;
     syncServer(res.state);
     render();
@@ -1740,8 +2231,9 @@ async function doAdminLogin(pin) {
 }
 
 async function adminLogout() {
-  try { await api("/api/admin/logout", { method: "POST" }); } catch (e) {}
+  try { await api(API("/admin/logout"), { method: "POST" }); } catch (e) {}
   localStorage.removeItem(LS_A);
+  localStorage.removeItem(LS_LAST);
   app.adminToken = null;
   app.adminState = null;
   app.editingPrizeId = null;
@@ -1752,7 +2244,7 @@ async function adminLogout() {
 
 async function patchEvent(patch, successMessage) {
   try {
-    const res = await api("/api/admin/event", { method: "PATCH", body: patch });
+    const res = await api(API("/admin/event"), { method: "PATCH", body: patch });
     app.adminState = res.state;
     syncServer(res.state);
     render();
@@ -1794,7 +2286,7 @@ async function savePrizeForm(form) {
   if (btn) { btn.disabled = true; btn.textContent = "保存中…"; }
   const editing = !!app.editingPrizeId;
   try {
-    const res = await api(editing ? `/api/admin/prizes/${app.editingPrizeId}` : "/api/admin/prizes", {
+    const res = await api(editing ? API(`/admin/prizes/${app.editingPrizeId}`) : API("/admin/prizes"), {
       method: editing ? "PATCH" : "POST",
       body: payload,
     });
@@ -1821,7 +2313,7 @@ function confirmDeletePrize(prizeId) {
     danger: true,
     onConfirm: async () => {
       try {
-        const res = await api(`/api/admin/prizes/${prizeId}`, { method: "DELETE" });
+        const res = await api(API(`/admin/prizes/${prizeId}`), { method: "DELETE" });
         app.adminState = res.state;
         syncServer(res.state);
         app.drawDraft.prizeIds.delete(prizeId);
@@ -1842,7 +2334,7 @@ async function startDraw(button) {
   app.busy = true;
   if (button) { button.disabled = true; button.textContent = "开奖中…"; }
   try {
-    const res = await api("/api/admin/draws", {
+    const res = await api(API("/admin/draws"), {
       method: "POST",
       body: {
         title: (d.title || defaultDrawTitle()).trim(),
@@ -1898,7 +2390,7 @@ async function submitSchedule(form) {
   const btn = form.querySelector('[type="submit"]');
   if (btn) { btn.disabled = true; btn.textContent = "提交中…"; }
   try {
-    const res = await api("/api/admin/schedule", {
+    const res = await api(API("/admin/schedule"), {
       method: "POST",
       body: {
         title: (d.title || defaultDrawTitle()).trim(),
@@ -1921,7 +2413,7 @@ async function submitSchedule(form) {
 
 async function cancelSchedule() {
   try {
-    const res = await api("/api/admin/schedule", { method: "DELETE" });
+    const res = await api(API("/admin/schedule"), { method: "DELETE" });
     app.adminState = res.state;
     syncServer(res.state);
     render();
@@ -1937,7 +2429,7 @@ function confirmRemoveParticipant(id, name) {
     danger: true,
     onConfirm: async () => {
       try {
-        const res = await api(`/api/admin/participants/${id}`, { method: "DELETE" });
+        const res = await api(API(`/admin/participants/${id}`), { method: "DELETE" });
         app.adminState = res.state;
         syncServer(res.state);
         closeModal();
@@ -1956,7 +2448,7 @@ function confirmClearHistory() {
     danger: true,
     onConfirm: async () => {
       try {
-        const res = await api("/api/admin/history/clear", { method: "POST" });
+        const res = await api(API("/admin/history/clear"), { method: "POST" });
         app.adminState = res.state;
         syncServer(res.state);
         app.shownResults.clear();
@@ -1968,10 +2460,11 @@ function confirmClearHistory() {
   });
 }
 
-async function exportFile(kind) {
+async function exportFile(kind, style) {
   if (!app.adminToken) return;
+  const query = style ? "?kind=" + encodeURIComponent(style) : "";
   try {
-    const res = await fetch(`/api/admin/export.${kind}`, {
+    const res = await fetch(API(`/admin/export.${kind}`) + query, {
       headers: { Authorization: "Bearer " + app.adminToken },
     });
     if (!res.ok) {
@@ -1986,7 +2479,7 @@ async function exportFile(kind) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `lucky_draw_results_${fileStamp()}.${kind}`;
+    a.download = `${ROOM_CODE ? ROOM_CODE + "_" : ""}${style === "participant" ? "winners" : "lucky_draw_results"}_${fileStamp()}.${kind}`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -2031,7 +2524,31 @@ document.addEventListener("click", async (event) => {
       await adminLogout();
       break;
     case "copy-participant-link":
-      copyText(location.origin + "/");
+      copyText(roomURL());
+      break;
+    case "copy-admin-link":
+      copyText(adminURLFor());
+      break;
+    case "goto-own-admin":
+      location.href = adminURLFor(ROOM_CODE);
+      break;
+    case "roster-import":
+      openRosterImport();
+      break;
+    case "roster-add":
+      openRosterAdd();
+      break;
+    case "roster-rename":
+      openRosterRename(btn.dataset.id, btn.dataset.name);
+      break;
+    case "roster-clear":
+      confirmClearRoster();
+      break;
+    case "pin-change":
+      openPinChange();
+      break;
+    case "export-winners":
+      await exportFile("xlsx", "participant");
       break;
     case "save-event":
       await saveEvent();
@@ -2089,6 +2606,12 @@ document.addEventListener("change", async (event) => {
     });
   } else if (t.matches('#prizeForm select[name="reward_type"]')) {
     togglePrizeRewardFields(t.value);
+  } else if (t.id === "poolModeSelect") {
+    if (app.adminState && t.value !== app.adminState.event.pool_mode) {
+      confirmSwitchPoolMode(t.value);
+    }
+  } else if (t.matches('#rosterImportForm input[name="file"]')) {
+    await handleRosterFile(t);
   }
 });
 
@@ -2110,9 +2633,28 @@ document.addEventListener("submit", async (event) => {
   if (form.id === "joinForm") {
     const input = form.querySelector('[name="name"]');
     await doJoin(input ? input.value : "");
+  } else if (form.id === "claimForm") {
+    const input = form.querySelector('[name="name"]');
+    await doClaim(input ? input.value : "");
   } else if (form.id === "adminLoginForm") {
     const input = form.querySelector('[name="pin"]');
     await doAdminLogin(input ? input.value : "");
+  } else if (form.id === "createRoomForm") {
+    await doCreateRoom(form);
+  } else if (form.id === "adminPinForm") {
+    const input = form.querySelector('[name="pin"]');
+    await doEntryAdminLogin(input ? input.value : "");
+  } else if (form.id === "joinCodeForm") {
+    const input = form.querySelector('[name="code"]');
+    await enterRoomCode(input ? input.value : "");
+  } else if (form.id === "rosterImportForm") {
+    await submitRosterImport(form);
+  } else if (form.id === "rosterAddForm") {
+    await submitRosterAdd(form);
+  } else if (form.id === "rosterRenameForm") {
+    await submitRosterRename(form);
+  } else if (form.id === "pinChangeForm") {
+    await submitPinChange(form);
   } else if (form.id === "prizeForm") {
     await savePrizeForm(form);
   } else if (form.id === "scheduleForm") {
@@ -2128,6 +2670,7 @@ document.addEventListener("keydown", (event) => {
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;
+  if (IS_ENTRY) return;
   if (IS_ADMIN && app.adminToken) refreshAdmin();
   else if (!IS_ADMIN) {
     if (app.participantToken) refreshParticipant();
@@ -2139,7 +2682,7 @@ document.addEventListener("visibilitychange", () => {
    Polling fallback
    ============================================================ */
 setInterval(() => {
-  if (document.hidden || app.busy) return;
+  if (document.hidden || app.busy || IS_ENTRY) return;
   if (wsAlive()) return;
   if (IS_ADMIN && app.adminToken) refreshAdmin();
   else if (!IS_ADMIN) {
@@ -2152,6 +2695,13 @@ setInterval(() => {
    Boot
    ============================================================ */
 async function boot() {
+  if (IS_ENTRY) {
+    const params = new URLSearchParams(location.search);
+    const missing = params.get("missing");
+    if (missing) app.entryNotice = `没有找到空间「${missing}」。可能已被服务器重启清除，请向发起者确认最新链接。`;
+    render();
+    return;
+  }
   if (IS_ADMIN) {
     if (app.adminToken) {
       render();
