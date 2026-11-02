@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: lucky-draw
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: ADMIN_PIN
+        value: "888888"
