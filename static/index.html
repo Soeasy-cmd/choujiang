@@ -64,6 +64,8 @@
     backdrop-filter:blur(16px);
     -webkit-backdrop-filter:blur(16px);
     box-shadow:0 18px 50px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.06);
+    /* Keep layout/style work scoped to the card (paint containment would clip shadows). */
+    contain:layout style;
   }
   .glass h3{font-size:1rem;margin-bottom:.85rem}
   .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:1rem}
@@ -278,7 +280,7 @@
 
   /* ---------- participants ---------- */
   .p-list{display:flex;flex-direction:column}
-  .p-row{display:flex;align-items:center;gap:.7rem;padding:.55rem .3rem;border-bottom:1px dashed rgba(255,255,255,.07);font-size:.88rem;flex-wrap:wrap}
+  .p-row{display:flex;align-items:center;gap:.7rem;padding:.55rem .3rem;border-bottom:1px dashed rgba(255,255,255,.07);font-size:.88rem;flex-wrap:wrap;content-visibility:auto;contain-intrinsic-size:auto 56px}
   .p-row:last-child{border-bottom:none}
   .dot{width:8px;height:8px;border-radius:50%;background:#475569;flex:none}
   .dot.on{background:var(--green);box-shadow:0 0 10px rgba(52,211,153,.7)}
@@ -684,7 +686,7 @@ function updateCountdowns() {
       : `${m} 分 ${sec} 秒`;
   });
 }
-setInterval(updateCountdowns, 500);
+setInterval(updateCountdowns, 1000);
 
 /* ============================================================
    Shared label helpers
@@ -719,12 +721,35 @@ function shuffle(list) {
 /* ============================================================
    Render switch
    ============================================================ */
+// Rebuilding the page must not steal focus from whoever is typing.
+function captureFocus(root) {
+  const el = document.activeElement;
+  if (!el || !root.contains(el) || !el.id) return null;
+  const f = { id: el.id };
+  try { f.start = el.selectionStart; f.end = el.selectionEnd; } catch (e) {}
+  return f;
+}
+
+function restoreFocus(root, f) {
+  if (!f) return;
+  const el = root.querySelector("#" + f.id);
+  if (!el) return;
+  try {
+    el.focus({ preventScroll: true });
+    if (f.start != null && el.setSelectionRange) el.setSelectionRange(f.start, f.end);
+  } catch (e) {}
+}
+
 function render() {
   const root = document.getElementById("app");
+  const focus = captureFocus(root);
+  const scrollY = window.scrollY;
   if (IS_ENTRY) renderEntry(root);
   else if (app.roomMissing) renderRoomMissing(root);
   else if (IS_ADMIN) renderAdmin(root);
   else renderParticipant(root);
+  if (window.scrollY !== scrollY) window.scrollTo(0, scrollY);
+  restoreFocus(root, focus);
   updateCountdowns();
 }
 
@@ -1021,15 +1046,12 @@ const ADMIN_TABS = [
 ];
 const SRS_LABEL = { join: "报名加入", import: "名单导入" };
 
-function renderAdmin(root) {
-  if (!app.adminState) {
-    document.title = "主办方登录 · 幸运抽奖";
-    root.innerHTML = adminLoginHTML();
-    return;
-  }
-  const s = app.adminState;
-  document.title = `${s.event.name} · 后台`;
-  root.innerHTML = `
+// The admin shell (header + tab bar) is only rebuilt when it actually changes,
+// so frequent refreshes only swap the tab body instead of the whole page.
+let adminShellKey = null;
+
+function adminShellHTML(s) {
+  return `
     <header class="admin-top">
       <div class="admin-brand">
         <span class="logo">🎡</span>
@@ -1051,8 +1073,27 @@ function renderAdmin(root) {
       <nav class="tabs">
         ${ADMIN_TABS.map(([key, label]) => `<button class="tab ${app.adminTab === key ? "active" : ""}" data-action="admin-tab" data-tab="${key}">${label}</button>`).join("")}
       </nav>
-      <div class="tab-content">${renderAdminTab()}</div>
+      <div class="tab-content"></div>
     </main>`;
+}
+
+function renderAdmin(root) {
+  if (!app.adminState) {
+    document.title = "主办方登录 · 幸运抽奖";
+    adminShellKey = null;
+    root.innerHTML = adminLoginHTML();
+    return;
+  }
+  const s = app.adminState;
+  document.title = `${s.event.name} · 后台`;
+  const shellKey = [s.room.code, s.event.name, s.event.status, s.stats.online_count, app.adminTab].join("|");
+  if (shellKey !== adminShellKey || !root.querySelector(".tab-content")) {
+    root.innerHTML = adminShellHTML(s);
+    adminShellKey = shellKey;
+  }
+  const body = root.querySelector(".tab-content");
+  body.innerHTML = renderAdminTab();
+  if (app.adminTab === "participants" && app.drafts.search) filterParticipants(app.drafts.search);
   if (app.adminTab === "draw") {
     requestAnimationFrame(drawPreviewWheel);
   }
@@ -1764,10 +1805,17 @@ function paintWheel(ctx, size, names, rotation) {
   ctx.stroke();
 }
 
+// Keep the preview slice stable across refreshes; re-shuffling on every
+// background update made the wheel visibly jump.
+let previewCache = { key: "", names: [] };
+
 function previewNames() {
   const all = (app.adminState && app.adminState.eligible_names) || [];
   if (all.length <= 24) return all;
-  return shuffle(all).slice(0, 24);
+  const key = `${all.length}|${all[0] || ""}|${all[all.length - 1] || ""}|${all[Math.floor(all.length / 2)] || ""}`;
+  if (previewCache.key === key) return previewCache.names;
+  previewCache = { key, names: shuffle(all).slice(0, 24) };
+  return previewCache.names;
 }
 
 function drawPreviewWheel() {
@@ -2026,12 +2074,31 @@ async function refreshAdmin() {
   }
 }
 
+let refreshQueued = false;
+let refreshInFlight = false;
+let refreshPending = false;
+
+// Coalesce refresh bursts: edits echo back over WebSocket, so wait a moment
+// and then issue at most one fetch. While a fetch is in flight, remember that
+// another one is needed and run it right after (never overlap requests).
 function scheduleRefresh() {
+  if (refreshQueued) return;
+  refreshQueued = true;
   clearTimeout(refreshTimer);
-  refreshTimer = setTimeout(() => {
-    if (IS_ADMIN) refreshAdmin();
-    else refreshParticipant();
-  }, 280);
+  refreshTimer = setTimeout(async () => {
+    refreshQueued = false;
+    if (document.hidden) return;               // refreshed again on visibilitychange
+    if (app.busy) return;                       // action response already updates state
+    if (refreshInFlight) { refreshPending = true; return; }
+    refreshInFlight = true;
+    try {
+      if (IS_ADMIN) await refreshAdmin();
+      else await refreshParticipant();
+    } finally {
+      refreshInFlight = false;
+      if (refreshPending) { refreshPending = false; scheduleRefresh(); }
+    }
+  }, 350);
 }
 
 /* ============================================================
@@ -2516,7 +2583,9 @@ document.addEventListener("click", async (event) => {
       closeModal();
       break;
     case "admin-tab":
+      if (app.adminTab !== btn.dataset.tab) app.drafts.search = ""; // don't carry the filter across tabs
       app.adminTab = btn.dataset.tab;
+      adminShellKey = null; // tab highlight lives in the shell
       render();
       window.scrollTo({ top: 0, behavior: "smooth" });
       break;
@@ -2620,6 +2689,8 @@ document.addEventListener("input", (event) => {
   if (t.id === "eventNameInput") app.drafts.eventName = t.value;
   else if (t.id === "cooldownDaysInput") app.drafts.cooldownDays = t.value;
   else if (t.id === "drawTitleInput") app.drawDraft.title = t.value;
+  // Keep drafts in memory so a background refresh doesn't wipe typed text
+  // (no re-render here: that would break IME composition mid-word).
   else if (t.id === "joinNameInput") app.drafts.joinName = t.value;
   else if (t.id === "participantSearch") {
     app.drafts.search = t.value;
