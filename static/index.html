@@ -1441,7 +1441,7 @@ async function handleRosterFile(input) {
     if (ta) ta.value = data.names.join("\n");
     if (info) {
       info.className = "hint";
-      info.textContent = `已从 ${file.name}（${data.format}）识别到 ${data.names.length} 个名字，可在上方修改后导入。`;
+      info.textContent = `已从 ${file.name}（${data.format}）识别到 ${data.names.length} 个名字。自动识别可能不完整，请核对下方内容（每行一个名字，多余行删掉）后再导入。`;
     }
   } catch (e) {
     if (info) { info.className = "hint warn-text"; info.textContent = e.message; }

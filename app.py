@@ -1063,6 +1063,10 @@ def split_line(line: str) -> list[str]:
     return [part for part in re.split(r"[\t,，;；、|]+", line) if part.strip()]
 
 
+def drop_list_number(value: str) -> str:
+    return re.sub(r"^\s*(?:[（(]\s*\d+\s*[)）]|\d+\s*[\.、\)）．:：])\s*", "", value).strip()
+
+
 HEADING_HINTS = ("名单", "抽奖", "参与", "人员", "活动", "序号", "共计", "人数", "签到", "报名")
 
 
@@ -1108,9 +1112,29 @@ def extract_names_from_table(rows: list[list[str]], header_detected: bool = Fals
     for row in body:
         idx = name_idx if name_idx is not None else id_idx
         value = row[idx] if idx is not None and idx < len(row) else ""
-        value = re.sub(r"^\d+\s*[\.、\)）．]\s*", "", value)  # drop "1. " list numbering
+        value = drop_list_number(value)  # drop "1. " list numbering
         if value:
             names.append(value)
+    return names
+
+
+def names_from_plain_text(text: str) -> list[str]:
+    """Parse names from free text: skip title lines, drop "1. " numbering, split on separators."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    while lines and _looks_like_heading(lines[0]):
+        lines.pop(0)
+    if not lines:
+        return []
+    first = split_line(lines[0])
+    if any(_header_kind(cell) for cell in first):
+        rows = [first] + [split_line(line) for line in lines[1:]]
+        return extract_names_from_table(rows, header_detected=True)
+    names: list[str] = []
+    for line in lines:
+        for part in split_line(drop_list_number(line)):
+            part = part.strip()
+            if part and not part.isdigit():
+                names.append(part)
     return names
 
 
@@ -1142,18 +1166,8 @@ def parse_roster(filename: str, data: bytes) -> dict[str, Any]:
         for table_rows in tables:
             doc_names.extend(extract_names_from_table(table_rows))
         if not doc_names:
-            lines = [line.strip() for line in "\n".join(paragraphs).splitlines() if line.strip()]
-            # Drop title-like lines such as "2026 年会抽奖名单（共 30 人）".
-            while lines and _looks_like_heading(lines[0]):
-                lines.pop(0)
-            if lines:
-                first = split_line(lines[0])
-                if any(_header_kind(cell) for cell in first):
-                    rows = [first] + [split_line(line) for line in lines[1:]]
-                    doc_names = extract_names_from_table(rows, header_detected=True)
-                else:
-                    for line in lines:
-                        doc_names.extend(split_line(line))
+            # Drops title-like lines such as "2026 年会抽奖名单（共 30 人）".
+            doc_names = names_from_plain_text("\n".join(paragraphs))
         names = doc_names
         preparsed = True
     elif name.endswith(".xls"):
@@ -1178,15 +1192,7 @@ def parse_roster(filename: str, data: bytes) -> dict[str, Any]:
         names = extract_names_from_table(table)
     else:
         text = strip_code_comments(text, name)
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        if lines:
-            first = split_line(lines[0])
-            if any(_header_kind(cell) for cell in first):
-                rows = [first] + [split_line(line) for line in lines[1:]]
-                names = extract_names_from_table(rows, header_detected=True)
-            else:
-                for line in lines:
-                    names.extend(split_line(line))
+        names = names_from_plain_text(text)
 
     seen: set[str] = set()
     unique: list[str] = []
